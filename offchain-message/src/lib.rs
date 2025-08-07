@@ -319,7 +319,6 @@ impl OffchainMessage {
         }
     }
 
-    #[cfg(feature = "verify")]
     /// Verify that the message signature is valid for the given public key
     pub fn verify(
         &self,
