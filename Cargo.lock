@@ -2996,7 +2996,7 @@ dependencies = [
  "solana-bls-signatures",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-signature 3.0.0",
  "solana-signer 3.0.0",
  "subtle",
@@ -3038,7 +3038,7 @@ dependencies = [
  "solana-epoch-info",
  "solana-hash 3.0.0",
  "solana-instruction 3.0.0",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-message",
  "solana-pubkey 3.0.0",
  "solana-signature 3.0.0",
@@ -3325,7 +3325,7 @@ dependencies = [
  "solana-genesis-config",
  "solana-hash 3.0.0",
  "solana-inflation",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-logger",
  "solana-poh-config",
  "solana-pubkey 3.0.0",
@@ -3467,11 +3467,27 @@ dependencies = [
  "solana-derivation-path",
  "solana-pubkey 3.0.0",
  "solana-seed-derivable",
- "solana-seed-phrase",
+ "solana-seed-phrase 3.0.0",
  "solana-signature 3.0.0",
  "solana-signer 3.0.0",
  "static_assertions",
  "tiny-bip39",
+]
+
+[[package]]
+name = "solana-keypair"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd3f04aa1a05c535e93e121a95f66e7dcccf57e007282e8255535d24bf1e98bb"
+dependencies = [
+ "ed25519-dalek 1.0.1",
+ "five8",
+ "rand 0.7.3",
+ "solana-pubkey 2.4.0",
+ "solana-seed-phrase 2.2.1",
+ "solana-signature 2.3.0",
+ "solana-signer 2.2.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3618,12 +3634,14 @@ version = "3.0.0"
 dependencies = [
  "num_enum",
  "solana-hash 2.3.0",
+ "solana-keypair 2.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "solana-packet 2.2.1",
  "solana-pubkey 2.4.0",
  "solana-sanitize 2.2.1",
  "solana-sha256-hasher 2.3.0",
  "solana-signature 2.3.0",
  "solana-signer 2.2.1",
+ "static_assertions",
 ]
 
 [[package]]
@@ -3692,7 +3710,7 @@ dependencies = [
 name = "solana-presigner"
 version = "2.2.1"
 dependencies = [
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-pubkey 3.0.0",
  "solana-signature 3.0.0",
  "solana-signer 3.0.0",
@@ -3816,7 +3834,7 @@ dependencies = [
 name = "solana-quic-definitions"
 version = "2.3.1"
 dependencies = [
- "solana-keypair",
+ "solana-keypair 2.2.3",
 ]
 
 [[package]]
@@ -3886,7 +3904,7 @@ dependencies = [
  "solana-fee-structure",
  "solana-inflation",
  "solana-instructions-sysvar",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-message",
  "solana-offchain-message",
  "solana-presigner",
@@ -3898,7 +3916,7 @@ dependencies = [
  "solana-sdk-ids",
  "solana-sdk-macro",
  "solana-seed-derivable",
- "solana-seed-phrase",
+ "solana-seed-phrase 3.0.0",
  "solana-serde",
  "solana-serde-varint",
  "solana-short-vec",
@@ -3941,7 +3959,7 @@ dependencies = [
  "solana-address",
  "solana-hash 3.0.0",
  "solana-instruction 3.0.0",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-message",
  "solana-signature 3.0.0",
  "solana-signer 3.0.0",
@@ -4015,6 +4033,17 @@ name = "solana-seed-derivable"
 version = "3.0.0"
 dependencies = [
  "solana-derivation-path",
+]
+
+[[package]]
+name = "solana-seed-phrase"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36187af2324f079f65a675ec22b31c24919cb4ac22c79472e85d819db9bbbc15"
+dependencies = [
+ "hmac",
+ "pbkdf2 0.11.0",
+ "sha2 0.10.8",
 ]
 
 [[package]]
@@ -4231,7 +4260,7 @@ name = "solana-system-transaction"
 version = "2.2.1"
 dependencies = [
  "solana-hash 3.0.0",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-message",
  "solana-pubkey 3.0.0",
  "solana-signer 3.0.0",
@@ -4306,7 +4335,7 @@ dependencies = [
  "solana-frozen-abi-macro",
  "solana-hash 3.0.0",
  "solana-instruction 3.0.0",
- "solana-keypair",
+ "solana-keypair 2.2.3",
  "solana-logger",
  "solana-message",
  "solana-nonce",
