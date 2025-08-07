@@ -248,7 +248,7 @@ solana-instructions-sysvar = { path = "instructions-sysvar", version = "2.2.1" }
 solana-keccak-hasher = { path = "keccak-hasher", version = "3.0.0" }
 solana-keypair = { path = "keypair", version = "2.2.1" }
 solana-last-restart-slot = { path = "last-restart-slot", version = "2.2.1" }
-solana-loader-v2-interface = { path = "loader-v2-interface", version = "2.2.1" }
+solana-loader-v2-interface = { path = "loader-v2-interface", version = "3.0.0" }
 solana-loader-v3-interface = { path = "loader-v3-interface", version = "5.0.0" }
 solana-loader-v4-interface = { path = "loader-v4-interface", version = "2.2.1" }
 solana-logger = { path = "logger", version = "3.0.0" }
