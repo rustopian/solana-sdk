@@ -44,7 +44,9 @@ pub const PREAMBLE_AND_BODY_MAX_EXTENDED: usize = u16::MAX as usize;
 mod header {
     /// Calculate the total header size for the outer OffchainMessage
     pub const fn outer_header_len() -> usize {
-        super::OffchainMessage::SIGNING_DOMAIN.len() + 1 // version
+        super::OffchainMessage::SIGNING_DOMAIN
+            .len()
+            .saturating_add(1) // version
     }
 
     /// Calculate the total header size for v0::OffchainMessage (without signers)
@@ -54,15 +56,15 @@ mod header {
 
     /// Calculate the total variable header size for v0::OffchainMessage
     pub const fn v0_variable_header_len(signer_count: usize) -> usize {
-        signer_count * 32
+        signer_count.saturating_mul(32)
     }
 
     /// Calculate the total serialized size for a complete message
     pub const fn total_message_size(signer_count: usize, message_len: usize) -> usize {
         outer_header_len()
-            + v0_fixed_header_len()
-            + v0_variable_header_len(signer_count)
-            + message_len
+            .saturating_add(v0_fixed_header_len())
+            .saturating_add(v0_variable_header_len(signer_count))
+            .saturating_add(message_len)
     }
 }
 

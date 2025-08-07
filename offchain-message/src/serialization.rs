@@ -62,12 +62,15 @@ pub fn parse_application_domain(
     data: &[u8],
     offset: usize,
 ) -> Result<([u8; 32], usize), SanitizeError> {
-    if data.len() < offset + 32 {
+    let end_offset = offset
+        .checked_add(32)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    if data.len() < end_offset {
         return Err(SanitizeError::ValueOutOfBounds);
     }
     let mut application_domain = [0u8; 32];
-    application_domain.copy_from_slice(&data[offset..offset + 32]);
-    Ok((application_domain, offset + 32))
+    application_domain.copy_from_slice(&data[offset..end_offset]);
+    Ok((application_domain, end_offset))
 }
 
 /// Parse message format from data at given offset
@@ -79,7 +82,10 @@ pub fn parse_message_format(
         return Err(SanitizeError::ValueOutOfBounds);
     }
     let format = MessageFormat::try_from(data[offset]).map_err(|_| SanitizeError::InvalidValue)?;
-    Ok((format, offset + 1))
+    let next_offset = offset
+        .checked_add(1)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    Ok((format, next_offset))
 }
 
 /// Parse signer count from data at given offset
@@ -91,7 +97,10 @@ pub fn parse_signer_count(data: &[u8], offset: usize) -> Result<(usize, usize), 
     if signer_count == 0 {
         return Err(SanitizeError::InvalidValue);
     }
-    Ok((signer_count, offset + 1))
+    let next_offset = offset
+        .checked_add(1)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    Ok((signer_count, next_offset))
 }
 
 /// Parse signers from data at given offset
@@ -100,8 +109,13 @@ pub fn parse_signers(
     offset: usize,
     signer_count: usize,
 ) -> Result<(Vec<[u8; 32]>, usize), SanitizeError> {
-    let signers_size = signer_count * 32;
-    if data.len() < offset + signers_size {
+    let signers_size = signer_count
+        .checked_mul(32)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    let end_offset = offset
+        .checked_add(signers_size)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    if data.len() < end_offset {
         return Err(SanitizeError::ValueOutOfBounds);
     }
 
@@ -109,23 +123,32 @@ pub fn parse_signers(
     let mut current_offset = offset;
     for _ in 0..signer_count {
         let mut signer = [0u8; 32];
-        signer.copy_from_slice(&data[current_offset..current_offset + 32]);
+        let signer_end = current_offset
+            .checked_add(32)
+            .ok_or(SanitizeError::ValueOutOfBounds)?;
+        signer.copy_from_slice(&data[current_offset..signer_end]);
         signers.push(signer);
-        current_offset += 32;
+        current_offset = signer_end;
     }
     Ok((signers, current_offset))
 }
 
 /// Parse message length from data at given offset
 pub fn parse_message_length(data: &[u8], offset: usize) -> Result<(usize, usize), SanitizeError> {
-    if data.len() < offset + 2 {
+    let end_offset = offset
+        .checked_add(2)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    if data.len() < end_offset {
         return Err(SanitizeError::ValueOutOfBounds);
     }
-    let message_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+    let second_byte_offset = offset
+        .checked_add(1)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    let message_len = u16::from_le_bytes([data[offset], data[second_byte_offset]]) as usize;
     if message_len == 0 {
         return Err(SanitizeError::InvalidValue);
     }
-    Ok((message_len, offset + 2))
+    Ok((message_len, end_offset))
 }
 
 /// Parse message body from data at given offset
@@ -134,7 +157,10 @@ pub fn parse_message_body(
     offset: usize,
     expected_len: usize,
 ) -> Result<Vec<u8>, SanitizeError> {
-    if offset + expected_len != data.len() {
+    let expected_total = offset
+        .checked_add(expected_len)
+        .ok_or(SanitizeError::ValueOutOfBounds)?;
+    if expected_total != data.len() {
         return Err(SanitizeError::InvalidValue);
     }
     Ok(data[offset..].to_vec())
@@ -169,7 +195,7 @@ pub fn serialize_v0(
     assert!(!signers.is_empty() && signers.len() <= u8::MAX as usize);
 
     let reserve_size = super::v0::OffchainMessage::HEADER_LEN
-        .saturating_add(signers.len() * 32)
+        .saturating_add(signers.len().saturating_mul(32))
         .saturating_add(message.len());
     data.reserve(reserve_size);
 
