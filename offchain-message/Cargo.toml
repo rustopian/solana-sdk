@@ -15,9 +15,9 @@ all-features = true
 rustdoc-args = ["--cfg=docsrs"]
 
 [features]
+default = ["verify"]
 dev-context-only-utils = ["verify"]
 verify = ["dep:solana-pubkey", "solana-signature/verify"]
-default = ["verify"]
 
 [dependencies]
 num_enum = { workspace = true }
