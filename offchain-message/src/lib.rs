@@ -513,7 +513,11 @@ impl Envelope {
     /// Serialize the complete envelope (signatures + message)
     pub fn serialize(&self) -> Result<Vec<u8>, SanitizeError> {
         let message_bytes = self.message.serialize()?;
-        let mut data = Vec::with_capacity(1 + self.signatures.len() * 64 + message_bytes.len());
+        let mut data = Vec::with_capacity(
+            1_usize
+                .saturating_add(self.signatures.len().saturating_mul(64))
+                .saturating_add(message_bytes.len()),
+        );
 
         // Signature count (1 byte)
         data.push(self.signatures.len() as u8);
@@ -539,25 +543,36 @@ impl Envelope {
 
         // Parse signature count
         let sig_count = data[offset] as usize;
-        offset += 1;
+        offset = offset
+            .checked_add(1)
+            .ok_or(SanitizeError::ValueOutOfBounds)?;
 
         if sig_count == 0 {
             return Err(SanitizeError::InvalidValue);
         }
 
         // Check we have enough data for all signatures
-        if data.len() < offset + sig_count * 64 {
+        let signatures_size = sig_count
+            .checked_mul(64)
+            .ok_or(SanitizeError::ValueOutOfBounds)?;
+        let required_size = offset
+            .checked_add(signatures_size)
+            .ok_or(SanitizeError::ValueOutOfBounds)?;
+        if data.len() < required_size {
             return Err(SanitizeError::ValueOutOfBounds);
         }
 
         // Parse signatures
         let mut signatures = Vec::with_capacity(sig_count);
         for _ in 0..sig_count {
-            let signature_bytes: [u8; 64] = data[offset..offset + 64]
+            let end_offset = offset
+                .checked_add(64)
+                .ok_or(SanitizeError::ValueOutOfBounds)?;
+            let signature_bytes: [u8; 64] = data[offset..end_offset]
                 .try_into()
                 .map_err(|_| SanitizeError::ValueOutOfBounds)?;
             signatures.push(Signature::from(signature_bytes));
-            offset += 64;
+            offset = end_offset;
         }
 
         // Parse message
