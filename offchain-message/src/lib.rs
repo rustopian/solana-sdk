@@ -8,6 +8,10 @@ use {
     solana_signer::Signer,
 };
 
+pub mod envelope;
+pub mod serialization;
+pub use envelope::Envelope;
+
 #[cfg(test)]
 static_assertions::const_assert_eq!(OffchainMessage::HEADER_LEN, 17);
 #[cfg(test)]
@@ -36,6 +40,32 @@ pub const PREAMBLE_AND_BODY_MAX_LEDGER: usize = 1232;
 /// Extended format hard limit (u16::MAX total message size)
 pub const PREAMBLE_AND_BODY_MAX_EXTENDED: usize = u16::MAX as usize;
 
+/// Header and sizing calculations
+mod header {
+    /// Calculate the total header size for the outer OffchainMessage
+    pub const fn outer_header_len() -> usize {
+        super::OffchainMessage::SIGNING_DOMAIN.len() + 1 // version
+    }
+
+    /// Calculate the total header size for v0::OffchainMessage (without signers)
+    pub const fn v0_fixed_header_len() -> usize {
+        32 + 1 + 1 + 2 // app_domain + format + signer_count + msg_len
+    }
+
+    /// Calculate the total variable header size for v0::OffchainMessage
+    pub const fn v0_variable_header_len(signer_count: usize) -> usize {
+        signer_count * 32
+    }
+
+    /// Calculate the total serialized size for a complete message
+    pub const fn total_message_size(signer_count: usize, message_len: usize) -> usize {
+        outer_header_len()
+            + v0_fixed_header_len()
+            + v0_variable_header_len(signer_count)
+            + message_len
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Copy, Clone, TryFromPrimitive, IntoPrimitive)]
 pub enum MessageFormat {
@@ -47,7 +77,7 @@ pub enum MessageFormat {
 #[allow(clippy::arithmetic_side_effects)]
 pub mod v0 {
     use {
-        super::{is_printable_ascii, is_utf8, MessageFormat, OffchainMessage as Base},
+        super::{serialization, MessageFormat, OffchainMessage as Base},
         solana_hash::Hash,
         solana_packet::PACKET_DATA_SIZE,
         solana_sanitize::SanitizeError,
@@ -58,10 +88,10 @@ pub mod v0 {
     /// Struct always contains a non-empty valid message.
     #[derive(Debug, PartialEq, Eq, Clone)]
     pub struct OffchainMessage {
-        application_domain: [u8; 32],
-        format: MessageFormat,
-        signers: Vec<[u8; 32]>,
-        message: Vec<u8>,
+        pub application_domain: [u8; 32],
+        pub format: MessageFormat,
+        pub signers: Vec<[u8; 32]>,
+        pub message: Vec<u8>,
     }
 
     impl OffchainMessage {
@@ -92,153 +122,39 @@ pub mod v0 {
             signers: &[[u8; 32]],
             message: &[u8],
         ) -> Result<Self, SanitizeError> {
-            // Validate signers - must not be empty and count must fit in u8
-            if signers.is_empty() || signers.len() > u8::MAX as usize {
-                return Err(SanitizeError::ValueOutOfBounds);
-            }
-
-            // Validate message is not empty
-            if message.is_empty() {
-                return Err(SanitizeError::InvalidValue);
-            }
-
-            // Calculate total size including all components
-            let signers_size = signers.len() * 32;
-            let total_size = Base::HEADER_LEN + Self::HEADER_LEN + signers_size + message.len();
-
-            let format = if total_size <= super::PREAMBLE_AND_BODY_MAX_LEDGER {
-                if is_printable_ascii(message) {
-                    MessageFormat::RestrictedAscii
-                } else if is_utf8(message) {
-                    MessageFormat::LimitedUtf8
-                } else {
-                    return Err(SanitizeError::InvalidValue);
-                }
-            } else if total_size <= super::PREAMBLE_AND_BODY_MAX_EXTENDED {
-                if is_utf8(message) {
-                    MessageFormat::ExtendedUtf8
-                } else {
-                    return Err(SanitizeError::InvalidValue);
-                }
-            } else {
-                return Err(SanitizeError::ValueOutOfBounds);
-            };
+            let (application_domain, format, signers, message) =
+                serialization::new_v0_with_params(application_domain, signers, message)?;
 
             Ok(Self {
                 application_domain,
                 format,
-                signers: signers.to_vec(),
-                message: message.to_vec(),
+                signers,
+                message,
             })
         }
 
         /// Serialize the message to bytes, including the full header
         pub fn serialize(&self, data: &mut Vec<u8>) -> Result<(), SanitizeError> {
-            // invalid messages shouldn't be possible, but a quick sanity check never hurts
-            assert!(!self.message.is_empty());
-            assert!(!self.signers.is_empty() && self.signers.len() <= u8::MAX as usize);
-
-            let reserve_size = Self::HEADER_LEN
-                .saturating_add(self.signers.len() * 32)
-                .saturating_add(self.message.len());
-            data.reserve(reserve_size);
-
-            // application domain (32 bytes)
-            data.extend_from_slice(&self.application_domain);
-            // message format (1 byte)
-            data.push(self.format.into());
-            // signer count (1 byte)
-            data.push(self.signers.len() as u8);
-            // signers (signer_count * 32 bytes)
-            for signer in &self.signers {
-                data.extend_from_slice(signer);
-            }
-            // message length (2 bytes, little-endian)
-            data.extend_from_slice(&(self.message.len() as u16).to_le_bytes());
-            // message
-            data.extend_from_slice(&self.message);
-            Ok(())
+            serialization::serialize_v0(
+                &self.application_domain,
+                self.format,
+                &self.signers,
+                &self.message,
+                data,
+            )
         }
 
         /// Deserialize the message from bytes that include a full header
         pub fn deserialize(data: &[u8]) -> Result<Self, SanitizeError> {
-            // validate minimum data length (must at least contain fixed header)
-            if data.len() < Self::HEADER_LEN {
-                return Err(SanitizeError::ValueOutOfBounds);
-            }
+            let (application_domain, format, signers, message) =
+                serialization::deserialize_v0(data)?;
 
-            let mut offset = 0;
-
-            // parse application domain (32 bytes)
-            let mut application_domain = [0u8; 32];
-            application_domain.copy_from_slice(&data[offset..offset + 32]);
-            offset += 32;
-
-            // parse message format (1 byte)
-            let format =
-                MessageFormat::try_from(data[offset]).map_err(|_| SanitizeError::InvalidValue)?;
-            offset += 1;
-
-            // parse signer count (1 byte)
-            let signer_count = data[offset] as usize;
-            offset += 1;
-
-            // validate signer count
-            if signer_count == 0 {
-                return Err(SanitizeError::InvalidValue);
-            }
-
-            // validate we have enough data for all signers
-            let signers_size = signer_count * 32;
-            if data.len() < offset + signers_size + 2 {
-                return Err(SanitizeError::ValueOutOfBounds);
-            }
-
-            // parse signers (signer_count * 32 bytes)
-            let mut signers = Vec::with_capacity(signer_count);
-            for _ in 0..signer_count {
-                let mut signer = [0u8; 32];
-                signer.copy_from_slice(&data[offset..offset + 32]);
-                signers.push(signer);
-                offset += 32;
-            }
-
-            // parse message length (2 bytes, little-endian)
-            let message_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-            offset += 2;
-
-            // validate message length and total data length
-            if message_len == 0 || offset + message_len != data.len() {
-                return Err(SanitizeError::InvalidValue);
-            }
-
-            // parse message
-            let message = &data[offset..];
-
-            // validate format constraints
-            let total_size = Base::HEADER_LEN + Self::HEADER_LEN + signers_size + message_len;
-            let is_valid = match format {
-                MessageFormat::RestrictedAscii => {
-                    total_size <= super::PREAMBLE_AND_BODY_MAX_LEDGER && is_printable_ascii(message)
-                }
-                MessageFormat::LimitedUtf8 => {
-                    total_size <= super::PREAMBLE_AND_BODY_MAX_LEDGER && is_utf8(message)
-                }
-                MessageFormat::ExtendedUtf8 => {
-                    total_size <= super::PREAMBLE_AND_BODY_MAX_EXTENDED && is_utf8(message)
-                }
-            };
-
-            if is_valid {
-                Ok(Self {
-                    application_domain,
-                    format,
-                    signers,
-                    message: message.to_vec(),
-                })
-            } else {
-                Err(SanitizeError::InvalidValue)
-            }
+            Ok(Self {
+                application_domain,
+                format,
+                signers,
+                message,
+            })
         }
 
         /// Compute the SHA256 hash of the serialized off-chain message
@@ -246,22 +162,6 @@ pub mod v0 {
             let mut hasher = Hasher::default();
             hasher.hash(serialized_message);
             Ok(hasher.result())
-        }
-
-        pub fn get_format(&self) -> MessageFormat {
-            self.format
-        }
-
-        pub fn get_message(&self) -> &Vec<u8> {
-            &self.message
-        }
-
-        pub fn get_application_domain(&self) -> &[u8; 32] {
-            &self.application_domain
-        }
-
-        pub fn get_signers(&self) -> &[[u8; 32]] {
-            &self.signers
         }
     }
 }
@@ -365,58 +265,60 @@ impl OffchainMessage {
         }
     }
 
-    pub fn get_format(&self) -> MessageFormat {
-        match self {
-            Self::V0(msg) => msg.get_format(),
-        }
-    }
-
-    pub fn get_message(&self) -> &Vec<u8> {
-        match self {
-            Self::V0(msg) => msg.get_message(),
-        }
-    }
-
-    pub fn get_application_domain(&self) -> &[u8; 32] {
-        match self {
-            Self::V0(msg) => msg.get_application_domain(),
-        }
-    }
-
-    pub fn get_signers(&self) -> &[[u8; 32]] {
-        match self {
-            Self::V0(msg) => msg.get_signers(),
-        }
-    }
-
     /// Sign the message with provided keypair
     /// For CLI compatibility: if message was created with default signer, update it with actual signer
     /// For spec compliance: verify signer matches expected pubkey in message
     pub fn sign(&self, signer: &dyn Signer) -> Result<Signature, SanitizeError> {
         let signer_pubkey = signer.pubkey().to_bytes();
-        let message_signers = self.get_signers();
+        let message_signers = match self {
+            Self::V0(msg) => &msg.signers,
+        };
 
-        // CLI compatibility: if this is a default/dummy message (all-zero signer),
-        // create a proper version with the actual signer
-        if message_signers.len() == 1 && message_signers[0] == [0u8; 32] {
-            let proper_message = Self::new_with_params(
-                self.get_version(),
-                *self.get_application_domain(),
-                &[signer_pubkey],
-                self.get_message(),
-            )?;
-            return Ok(signer.sign_message(&proper_message.serialize()?));
+        if Self::is_single_dummy_signer_message(message_signers) {
+            return Self::sign_with_rebuilt_message(self, signer, signer_pubkey);
         }
 
-        // Spec compliance: verify signer is one of the expected signers
-        if !message_signers.iter().any(|&s| s == signer_pubkey) {
-            return Err(SanitizeError::InvalidValue);
-        }
+        // Spec compliance: verify signer is authorized
+        Self::verify_signer_authorized(message_signers, &signer_pubkey)?;
 
         Ok(signer.sign_message(&self.serialize()?))
     }
 
-    #[cfg(feature = "verify")]
+    /// Check if message has single dummy/default signer
+    fn is_single_dummy_signer_message(signers: &[[u8; 32]]) -> bool {
+        signers.len() == 1 && signers[0] == [0u8; 32]
+    }
+
+    /// Create proper message with actual signer and sign it
+    fn sign_with_rebuilt_message(
+        original: &Self,
+        signer: &dyn Signer,
+        signer_pubkey: [u8; 32],
+    ) -> Result<Signature, SanitizeError> {
+        let (application_domain, message) = match original {
+            Self::V0(msg) => (msg.application_domain, &msg.message),
+        };
+        let proper_message = Self::new_with_params(
+            original.get_version(),
+            application_domain,
+            &[signer_pubkey],
+            message,
+        )?;
+        Ok(signer.sign_message(&proper_message.serialize()?))
+    }
+
+    /// Verify that the signer is authorized to sign this message
+    fn verify_signer_authorized(
+        message_signers: &[[u8; 32]],
+        signer_pubkey: &[u8; 32],
+    ) -> Result<(), SanitizeError> {
+        if message_signers.contains(signer_pubkey) {
+            Ok(())
+        } else {
+            Err(SanitizeError::InvalidValue)
+        }
+    }
+
     /// Verify that the message signature is valid for the given public key
     pub fn verify(
         &self,
@@ -602,13 +504,13 @@ mod tests {
 
     #[test]
     fn test_offchain_message_ascii() {
+        #[allow(deprecated)]
         let message = OffchainMessage::new(0, b"Test Message").unwrap();
         assert_eq!(message.get_version(), 0);
-        assert_eq!(message.get_format(), MessageFormat::RestrictedAscii);
-        assert_eq!(message.get_message().as_slice(), b"Test Message");
         assert!(
-            matches!(message, OffchainMessage::V0(ref msg) if msg.get_format() == MessageFormat::RestrictedAscii)
+            matches!(message, OffchainMessage::V0(ref msg) if msg.format == MessageFormat::RestrictedAscii)
         );
+        assert!(matches!(message, OffchainMessage::V0(ref msg) if msg.message == b"Test Message"));
         let serialized = [
             255, 115, 111, 108, 97, 110, 97, 32, 111, 102, 102, 99, 104, 97, 105, 110,
             0, // signing domain + version
@@ -629,15 +531,14 @@ mod tests {
 
     #[test]
     fn test_offchain_message_utf8() {
+        #[allow(deprecated)]
         let message = OffchainMessage::new(0, "Тестовое сообщение".as_bytes()).unwrap();
         assert_eq!(message.get_version(), 0);
-        assert_eq!(message.get_format(), MessageFormat::LimitedUtf8);
-        assert_eq!(
-            message.get_message().as_slice(),
-            "Тестовое сообщение".as_bytes()
+        assert!(
+            matches!(message, OffchainMessage::V0(ref msg) if msg.format == MessageFormat::LimitedUtf8)
         );
         assert!(
-            matches!(message, OffchainMessage::V0(ref msg) if msg.get_format() == MessageFormat::LimitedUtf8)
+            matches!(message, OffchainMessage::V0(ref msg) if msg.message == "Тестовое сообщение".as_bytes())
         );
         let serialized = [
             255, 115, 111, 108, 97, 110, 97, 32, 111, 102, 102, 99, 104, 97, 105, 110,
@@ -654,38 +555,16 @@ mod tests {
             181, // UTF-8 message
         ];
         assert_eq!(message.serialize().unwrap(), serialized);
-        // Hash will be different due to new format - let's verify serialization first
-        let _hash = message.hash().unwrap();
+        let hash = message.hash().unwrap();
+        assert_eq!(
+            hash.to_string(),
+            "E5tkTdEzcYTe5deSvw5jqzwPUEVBT83P4aHCYxjtzEW8"
+        );
         assert_eq!(message, OffchainMessage::deserialize(&serialized).unwrap());
     }
 
     #[test]
-    fn test_offchain_message_sign_and_verify() {
-        let keypair = Keypair::new();
-
-        // Use the simple constructor (CLI/Agave compatibility)
-        let message = OffchainMessage::new(0, b"Test Message").unwrap();
-
-        // Create the expected final message (what sign() actually produces)
-        let expected_final_message = OffchainMessage::new_with_params(
-            0,
-            [0u8; 32],                      // default application domain
-            &[keypair.pubkey().to_bytes()], // actual signer
-            b"Test Message",
-        )
-        .unwrap();
-
-        // Sign using the original message
-        let signature = message.sign(&keypair).unwrap();
-
-        // Verify against the expected final message
-        assert!(expected_final_message
-            .verify(&keypair.pubkey(), &signature)
-            .unwrap());
-    }
-
-    #[test]
-    fn test_agave_cli_exact_usage() {
+    fn test_deprecated_new_then_sign_and_verify() {
         // Test the pattern that Agave CLI uses:
         // let message = OffchainMessage::new(version, message_text.as_bytes())
         //     .map_err(|_| CliError::BadParameter("VERSION or MESSAGE".to_string()))?;
@@ -697,34 +576,31 @@ mod tests {
         let version = 0u8;
         let message_text = "Test Message";
 
+        #[allow(deprecated)]
         let message = OffchainMessage::new(version, message_text.as_bytes()).unwrap();
         let signature = message.sign(&keypair).unwrap();
 
         assert_eq!(message.get_version(), 0);
-        assert_eq!(message.get_message().as_slice(), message_text.as_bytes());
+        assert!(
+            matches!(message, OffchainMessage::V0(ref msg) if msg.message == message_text.as_bytes())
+        );
 
-        // Verify the signature verifies against the keypair's pubkey
-        // Note: Since the message is created with dummy signer with new(), the sign()
-        // method internally creates a proper message with the actual signer's pubkey
-        #[cfg(feature = "verify")]
-        {
-            // Create the expected signed message (what sign() actually signed)
-            let expected_signed_message = OffchainMessage::new_with_params(
-                0,
-                [0u8; 32], // default application domain
-                &[keypair.pubkey().to_bytes()],
-                message_text.as_bytes(),
-            )
+        // Create the expected signed message (what sign() actually signed)
+        let expected_signed_message = OffchainMessage::new_with_params(
+            0,
+            [0u8; 32], // default application domain
+            &[keypair.pubkey().to_bytes()],
+            message_text.as_bytes(),
+        )
+        .unwrap();
+
+        let is_valid = expected_signed_message
+            .verify(&keypair.pubkey(), &signature)
             .unwrap();
-
-            let is_valid = expected_signed_message
-                .verify(&keypair.pubkey(), &signature)
-                .unwrap();
-            assert!(
-                is_valid,
-                "Signature should be valid for the keypair that signed it"
-            );
-        }
+        assert!(
+            is_valid,
+            "Signature should be valid for the keypair that signed it"
+        );
     }
 
     #[test]
@@ -742,10 +618,14 @@ mod tests {
 
         // Verify all fields are set correctly
         assert_eq!(message.get_version(), 0);
-        assert_eq!(message.get_application_domain(), &application_domain);
-        assert_eq!(message.get_signers(), &signers[..]);
-        assert_eq!(message.get_message().as_slice(), message_text);
-        assert_eq!(message.get_format(), MessageFormat::RestrictedAscii);
+        assert!(
+            matches!(message, OffchainMessage::V0(ref msg) if msg.application_domain == application_domain)
+        );
+        assert!(matches!(message, OffchainMessage::V0(ref msg) if msg.signers == signers));
+        assert!(matches!(message, OffchainMessage::V0(ref msg) if msg.message == message_text));
+        assert!(
+            matches!(message, OffchainMessage::V0(ref msg) if msg.format == MessageFormat::RestrictedAscii)
+        );
 
         // Test serialization and deserialization
         let serialized = message.serialize().unwrap();
@@ -777,7 +657,9 @@ mod tests {
         let message = OffchainMessage::new_with_domain(0, custom_domain, b"Domain test").unwrap();
 
         // Verify domain is set correctly
-        assert_eq!(message.get_application_domain(), &custom_domain);
+        assert!(
+            matches!(message, OffchainMessage::V0(ref msg) if msg.application_domain == custom_domain)
+        );
 
         // Sign and verify it works
         let signature = message.sign(&keypair).unwrap();
@@ -797,207 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn test_envelope_functionality() {
-        use solana_signer::Signer;
-
-        let application_domain = [0xEEu8; 32];
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-
-        let signer1_pubkey = keypair1.pubkey().to_bytes();
-        let signer2_pubkey = keypair2.pubkey().to_bytes();
-        let signers_pubkeys = [signer1_pubkey, signer2_pubkey];
-
-        // Create message with multiple signers
-        let message = OffchainMessage::new_with_params(
-            0,
-            application_domain,
-            &signers_pubkeys,
-            b"Multi-sig test",
-        )
-        .unwrap();
-
-        // Create envelope with all signatures
-        let signers: [&dyn Signer; 2] = [&keypair1, &keypair2];
-        let envelope = Envelope::sign_all(message.clone(), &signers).unwrap();
-
-        // Verify envelope
-        assert_eq!(envelope.signatures().len(), 2);
-        assert_eq!(envelope.message(), &message);
-
-        // Test serialization/deserialization
-        let serialized = envelope.serialize().unwrap();
-        let deserialized = Envelope::deserialize(&serialized).unwrap();
-        assert_eq!(envelope, deserialized);
-
-        // Test verification
-        #[cfg(feature = "verify")]
-        assert!(envelope.verify_all().unwrap());
-    }
-
-    #[test]
-    fn test_multi_signer_3_parties_success() {
-        use solana_signer::Signer;
-
-        // Create 3 keypairs for a 3-party multi-signer message (all must sign)
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new();
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        let pubkey3 = keypair3.pubkey().to_bytes();
-
-        // Create message with all 3 signers listed
-        let signers_in_message = [pubkey1, pubkey2, pubkey3];
-        let application_domain = [0x42u8; 32];
-        let message = OffchainMessage::new_with_params(
-            0,
-            application_domain,
-            &signers_in_message,
-            b"3-party multi-signer test",
-        )
-        .unwrap();
-
-        // Create envelope with all 3 signers
-        let signing_keypairs: [&dyn Signer; 3] = [&keypair1, &keypair2, &keypair3];
-        let envelope = Envelope::sign_all(message.clone(), &signing_keypairs).unwrap();
-
-        // Verify envelope structure
-        assert_eq!(envelope.signatures().len(), 3);
-        assert_eq!(envelope.message(), &message);
-        assert_eq!(envelope.message().get_signers().len(), 3);
-
-        // Test serialization/deserialization
-        let serialized = envelope.serialize().unwrap();
-        let deserialized = Envelope::deserialize(&serialized).unwrap();
-        assert_eq!(envelope, deserialized);
-
-        // Test verification
-        #[cfg(feature = "verify")]
-        assert!(envelope.verify_all().unwrap());
-    }
-
-    #[test]
-    fn test_multi_signer_partial_signatures() {
-        use solana_signer::Signer;
-
-        // Create 3 keypairs but only 2 will provide valid signatures
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new(); // This one won't sign
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        let pubkey3 = keypair3.pubkey().to_bytes();
-
-        // Create message with 3 signers listed (but we'll only provide 2 valid signatures)
-        let signers_in_message = [pubkey1, pubkey2, pubkey3];
-        let message = OffchainMessage::new_with_params(
-            0,
-            [0x42u8; 32],
-            &signers_in_message,
-            b"partial signatures test",
-        )
-        .unwrap();
-
-        // Sign only with first 2 signers, create empty signature for 3rd
-        let message_bytes = message.serialize().unwrap();
-        let sig1 = keypair1.sign_message(&message_bytes);
-        let sig2 = keypair2.sign_message(&message_bytes);
-        let empty_sig = Signature::from([0u8; 64]); // Placeholder for missing signature
-
-        // Create envelope manually with partial signatures
-        let signatures = vec![sig1, sig2, empty_sig];
-        let envelope = Envelope::new(message.clone(), signatures);
-
-        // Verify structure
-        assert_eq!(envelope.signatures().len(), 3);
-        assert_eq!(envelope.message(), &message);
-
-        // Test serialization (should work even with invalid signatures)
-        let serialized = envelope.serialize().unwrap();
-        assert!(!serialized.is_empty());
-
-        // Verification should fail due to invalid signature
-        #[cfg(feature = "verify")]
-        {
-            let result = envelope.verify_all();
-            assert!(result.is_ok());
-            assert!(!result.unwrap()); // Should return false due to invalid signature
-        }
-    }
-
-    #[test]
-    fn test_multi_signer_missing_pubkey_in_message() {
-        use solana_signer::Signer;
-
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new();
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        // Note: pubkey3 is intentionally missing from the message
-
-        // Create message with only 2 signers
-        let signers_in_message = [pubkey1, pubkey2];
-        let message = OffchainMessage::new_with_params(
-            0,
-            [0x42u8; 32],
-            &signers_in_message,
-            b"Missing pubkey test",
-        )
-        .unwrap();
-
-        // Try to sign with 3 signers (including one not in the message)
-        let signing_keypairs: [&dyn Signer; 3] = [&keypair1, &keypair2, &keypair3];
-
-        // This should fail because keypair3's pubkey is not in the message
-        let result = Envelope::sign_all(message, &signing_keypairs);
-        assert!(result.is_err());
-
-        // Verify it's the expected error (signer count mismatch)
-        assert!(matches!(
-            result.unwrap_err(),
-            SanitizeError::ValueOutOfBounds
-        ));
-    }
-
-    #[test]
-    fn test_multi_signer_wrong_signer_order() {
-        use solana_signer::Signer;
-
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new();
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        let pubkey3 = keypair3.pubkey().to_bytes();
-
-        // Create message with signers in order: 1, 2, 3
-        let signers_in_message = [pubkey1, pubkey2, pubkey3];
-        let message = OffchainMessage::new_with_params(
-            0,
-            [0x42u8; 32],
-            &signers_in_message,
-            b"Wrong order test",
-        )
-        .unwrap();
-
-        // Try to sign with signers in wrong order: 2, 1, 3
-        let signing_keypairs: [&dyn Signer; 3] = [&keypair2, &keypair1, &keypair3];
-
-        // This should fail because the order doesn't match
-        let result = Envelope::sign_all(message, &signing_keypairs);
-        assert!(result.is_err());
-
-        // Verify it's the expected error (invalid value due to pubkey mismatch)
-        assert!(matches!(result.unwrap_err(), SanitizeError::InvalidValue));
-    }
-
-    #[test]
     fn test_spec_constant_usage() {
         let keypair = Keypair::new();
         let signer_pubkey = keypair.pubkey().to_bytes();
@@ -1006,7 +687,9 @@ mod tests {
         let small_msg =
             OffchainMessage::new_with_params(0, [0u8; 32], &[signer_pubkey], b"Small message")
                 .unwrap();
-        assert_eq!(small_msg.get_format(), MessageFormat::RestrictedAscii);
+        assert!(
+            matches!(small_msg, OffchainMessage::V0(ref msg) if msg.format == MessageFormat::RestrictedAscii)
+        );
 
         // Large message should be ExtendedUtf8 (if it fits in 65535)
         let large_msg_size = PREAMBLE_AND_BODY_MAX_LEDGER + 100;
@@ -1016,6 +699,8 @@ mod tests {
 
         let large_msg =
             OffchainMessage::new_with_params(0, [0u8; 32], &[signer_pubkey], &large_body).unwrap();
-        assert_eq!(large_msg.get_format(), MessageFormat::ExtendedUtf8);
+        assert!(
+            matches!(large_msg, OffchainMessage::V0(ref msg) if msg.format == MessageFormat::ExtendedUtf8)
+        );
     }
 }
