@@ -2,7 +2,10 @@
 //! Matches the format from the [proposal spec here](https://github.com/anza-xyz/agave/blob/master/docs/src/proposals/off-chain-message-signing.md).
 
 use {
-    crate::OffchainMessage, solana_sanitize::SanitizeError, solana_signature::Signature,
+    crate::OffchainMessage,
+    solana_sanitize::SanitizeError,
+    solana_serialize_utils::{append_slice, append_u8, read_slice, read_u8},
+    solana_signature::Signature,
     solana_signer::Signer,
 };
 
@@ -21,20 +24,9 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    /// Create a new envelope from existing signatures and message.
-    pub fn new(message: OffchainMessage, signatures: Vec<Signature>) -> Self {
-        Self {
-            message,
-            signatures,
-        }
-    }
-
     /// Create a new envelope by signing with all provided signers
     /// All signers must match the signers list in the message, in order
-    pub fn sign_all(
-        message: OffchainMessage,
-        signers: &[&dyn Signer],
-    ) -> Result<Self, SanitizeError> {
+    pub fn new(message: OffchainMessage, signers: &[&dyn Signer]) -> Result<Self, SanitizeError> {
         let message_signers = match &message {
             crate::OffchainMessage::V0(msg) => &msg.signers,
         };
@@ -104,15 +96,15 @@ impl Envelope {
         );
 
         // Signature count (1 byte)
-        data.push(self.signatures.len() as u8);
+        append_u8(&mut data, self.signatures.len() as u8);
 
         // Signatures (64 bytes each)
         for signature in &self.signatures {
-            data.extend_from_slice(signature.as_ref());
+            append_slice(&mut data, signature.as_ref());
         }
 
         // Message preamble and body
-        data.extend_from_slice(&message_bytes);
+        append_slice(&mut data, &message_bytes);
 
         Ok(data)
     }
@@ -126,37 +118,22 @@ impl Envelope {
         let mut offset = 0;
 
         // Parse signature count
-        let sig_count = data[offset] as usize;
-        offset = offset
-            .checked_add(1)
-            .ok_or(SanitizeError::ValueOutOfBounds)?;
+        let sig_count =
+            read_u8(&mut offset, data).map_err(|_| SanitizeError::ValueOutOfBounds)? as usize;
 
         if sig_count == 0 {
             return Err(SanitizeError::InvalidValue);
         }
 
-        // Check we have enough data for all signatures
-        let signatures_size = sig_count
-            .checked_mul(64)
-            .ok_or(SanitizeError::ValueOutOfBounds)?;
-        let required_size = offset
-            .checked_add(signatures_size)
-            .ok_or(SanitizeError::ValueOutOfBounds)?;
-        if data.len() < required_size {
-            return Err(SanitizeError::ValueOutOfBounds);
-        }
-
         // Parse signatures
         let mut signatures = Vec::with_capacity(sig_count);
         for _ in 0..sig_count {
-            let end_offset = offset
-                .checked_add(64)
-                .ok_or(SanitizeError::ValueOutOfBounds)?;
-            let signature_bytes: [u8; 64] = data[offset..end_offset]
+            let signature_bytes =
+                read_slice(&mut offset, data, 64).map_err(|_| SanitizeError::ValueOutOfBounds)?;
+            let signature_array: [u8; 64] = signature_bytes
                 .try_into()
                 .map_err(|_| SanitizeError::ValueOutOfBounds)?;
-            signatures.push(Signature::from(signature_bytes));
-            offset = end_offset;
+            signatures.push(Signature::from(signature_array));
         }
 
         // Parse message
@@ -204,43 +181,6 @@ mod tests {
 
     #[test]
     fn test_envelope_functionality() {
-        let application_domain = [0xEEu8; 32];
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-
-        let signer1_pubkey = keypair1.pubkey().to_bytes();
-        let signer2_pubkey = keypair2.pubkey().to_bytes();
-        let signers_pubkeys = [signer1_pubkey, signer2_pubkey];
-
-        // Create message with multiple signers
-        let message = OffchainMessage::new_with_params(
-            0,
-            application_domain,
-            &signers_pubkeys,
-            b"Multi-sig test",
-        )
-        .unwrap();
-
-        // Create envelope with all signatures
-        let signers: [&dyn Signer; 2] = [&keypair1, &keypair2];
-        let envelope = Envelope::sign_all(message.clone(), &signers).unwrap();
-
-        // Verify envelope
-        assert_eq!(envelope.signatures().len(), 2);
-        assert_eq!(envelope.message(), &message);
-
-        // Test serialization/deserialization
-        let serialized = envelope.serialize().unwrap();
-        let deserialized = Envelope::deserialize(&serialized).unwrap();
-        assert_eq!(envelope, deserialized);
-
-        // Test verification
-        #[cfg(feature = "verify")]
-        assert!(envelope.verify_all().unwrap());
-    }
-
-    #[test]
-    fn test_multi_signer_3_parties_success() {
         // Create 3 keypairs for a 3-party multi-signer message (all must sign)
         let keypair1 = Keypair::new();
         let keypair2 = Keypair::new();
@@ -263,7 +203,7 @@ mod tests {
 
         // Create envelope with all 3 signers
         let signing_keypairs: [&dyn Signer; 3] = [&keypair1, &keypair2, &keypair3];
-        let envelope = Envelope::sign_all(message.clone(), &signing_keypairs).unwrap();
+        let envelope = Envelope::new(message.clone(), &signing_keypairs).unwrap();
 
         // Verify envelope structure
         assert_eq!(envelope.signatures().len(), 3);
@@ -283,115 +223,45 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_signer_partial_signatures() {
-        // Create 3 keypairs but only 2 will provide valid signatures
+    fn test_envelope_validation_failures() {
         let keypair1 = Keypair::new();
         let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new(); // This one won't sign
+        let keypair3 = Keypair::new();
+        let wrong_keypair = Keypair::new();
 
         let pubkey1 = keypair1.pubkey().to_bytes();
         let pubkey2 = keypair2.pubkey().to_bytes();
         let pubkey3 = keypair3.pubkey().to_bytes();
 
-        // Create message with 3 signers listed (but we'll only provide 2 valid signatures)
-        let signers_in_message = [pubkey1, pubkey2, pubkey3];
-        let message = OffchainMessage::new_with_params(
-            0,
-            [0x42u8; 32],
-            &signers_in_message,
-            b"partial signatures test",
-        )
-        .unwrap();
-
-        // Sign only with first 2 signers, create empty signature for 3rd
-        let message_bytes = message.serialize().unwrap();
-        let sig1 = keypair1.sign_message(&message_bytes);
-        let sig2 = keypair2.sign_message(&message_bytes);
-        let empty_sig = Signature::from([0u8; 64]); // Placeholder for missing signature
-
-        // Create envelope manually with partial signatures
-        let signatures = vec![sig1, sig2, empty_sig];
-        let envelope = Envelope::new(message.clone(), signatures);
-
-        // Verify structure
-        assert_eq!(envelope.signatures().len(), 3);
-        assert_eq!(envelope.message(), &message);
-
-        // Test serialization (should work even with invalid signatures)
-        let serialized = envelope.serialize().unwrap();
-        assert!(!serialized.is_empty());
-
-        // Verification should fail due to invalid signature
-        #[cfg(feature = "verify")]
-        {
-            let result = envelope.verify_all();
-            assert!(result.is_ok());
-            assert!(!result.unwrap()); // Should return false due to invalid signature
-        }
-    }
-
-    #[test]
-    fn test_multi_signer_missing_pubkey_in_message() {
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new();
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        // Note: pubkey3 is intentionally missing from the message
-
-        // Create message with only 2 signers
-        let signers_in_message = [pubkey1, pubkey2];
-        let message = OffchainMessage::new_with_params(
-            0,
-            [0x42u8; 32],
-            &signers_in_message,
-            b"Missing pubkey test",
-        )
-        .unwrap();
-
-        // Try to sign with 3 signers (including one not in the message)
-        let signing_keypairs: [&dyn Signer; 3] = [&keypair1, &keypair2, &keypair3];
-
-        // This should fail because keypair3's pubkey is not in the message
-        let result = Envelope::sign_all(message, &signing_keypairs);
-        assert!(result.is_err());
-
-        // Verify it's the expected error (signer count mismatch)
+        // Test 1: Wrong signer count (too many signers)
+        let message_2_signers =
+            OffchainMessage::new_with_params(0, [0x42u8; 32], &[pubkey1, pubkey2], b"count test")
+                .unwrap();
+        let too_many_signers: [&dyn Signer; 3] = [&keypair1, &keypair2, &keypair3];
         assert!(matches!(
-            result.unwrap_err(),
+            Envelope::new(message_2_signers, &too_many_signers).unwrap_err(),
             SanitizeError::ValueOutOfBounds
         ));
-    }
 
-    #[test]
-    fn test_multi_signer_wrong_signer_order() {
-        let keypair1 = Keypair::new();
-        let keypair2 = Keypair::new();
-        let keypair3 = Keypair::new();
-
-        let pubkey1 = keypair1.pubkey().to_bytes();
-        let pubkey2 = keypair2.pubkey().to_bytes();
-        let pubkey3 = keypair3.pubkey().to_bytes();
-
-        // Create message with signers in order: 1, 2, 3
-        let signers_in_message = [pubkey1, pubkey2, pubkey3];
-        let message = OffchainMessage::new_with_params(
+        // Test 2: Wrong signer identity
+        let message_3_signers = OffchainMessage::new_with_params(
             0,
             [0x42u8; 32],
-            &signers_in_message,
-            b"Wrong order test",
+            &[pubkey1, pubkey2, pubkey3],
+            b"identity test",
         )
         .unwrap();
+        let wrong_identity: [&dyn Signer; 3] = [&keypair1, &keypair2, &wrong_keypair];
+        assert!(matches!(
+            Envelope::new(message_3_signers.clone(), &wrong_identity).unwrap_err(),
+            SanitizeError::InvalidValue
+        ));
 
-        // Try to sign with signers in wrong order: 2, 1, 3
-        let signing_keypairs: [&dyn Signer; 3] = [&keypair2, &keypair1, &keypair3];
-
-        // This should fail because the order doesn't match
-        let result = Envelope::sign_all(message, &signing_keypairs);
-        assert!(result.is_err());
-
-        // Verify it's the expected error (invalid value due to pubkey mismatch)
-        assert!(matches!(result.unwrap_err(), SanitizeError::InvalidValue));
+        // Test 3: Wrong signer order
+        let wrong_order: [&dyn Signer; 3] = [&keypair2, &keypair1, &keypair3];
+        assert!(matches!(
+            Envelope::new(message_3_signers, &wrong_order).unwrap_err(),
+            SanitizeError::InvalidValue
+        ));
     }
 }

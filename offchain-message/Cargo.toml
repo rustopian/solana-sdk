@@ -25,6 +25,7 @@ solana-hash = "2.3.0"
 solana-packet = "2.2.1"
 solana-pubkey = "2.4.0"
 solana-sanitize = "2.2.1"
+solana-serialize-utils = { workspace = true }
 solana-sha256-hasher = { version = "2.3.0", features = ["sha2"] }
 solana-signature = { version = "2.3.0", features = ["verify"] }
 solana-signer = "2.2.1"

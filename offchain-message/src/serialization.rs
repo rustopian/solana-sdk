@@ -3,6 +3,7 @@
 use {
     super::{header, MessageFormat, PREAMBLE_AND_BODY_MAX_EXTENDED, PREAMBLE_AND_BODY_MAX_LEDGER},
     solana_sanitize::SanitizeError,
+    solana_serialize_utils::{append_slice, append_u16, append_u8, read_slice, read_u16, read_u8},
 };
 
 /// Components of a v0 message: (application_domain, format, signers, message)
@@ -60,110 +61,70 @@ pub fn fits_extended_limit(total_size: usize) -> bool {
 /// Parse application domain from data at given offset
 pub fn parse_application_domain(
     data: &[u8],
-    offset: usize,
-) -> Result<([u8; 32], usize), SanitizeError> {
-    let end_offset = offset
-        .checked_add(32)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    if data.len() < end_offset {
-        return Err(SanitizeError::ValueOutOfBounds);
-    }
+    offset: &mut usize,
+) -> Result<[u8; 32], SanitizeError> {
+    let domain_bytes = read_slice(offset, data, 32).map_err(|_| SanitizeError::ValueOutOfBounds)?;
     let mut application_domain = [0u8; 32];
-    application_domain.copy_from_slice(&data[offset..end_offset]);
-    Ok((application_domain, end_offset))
+    application_domain.copy_from_slice(&domain_bytes);
+    Ok(application_domain)
 }
 
 /// Parse message format from data at given offset
 pub fn parse_message_format(
     data: &[u8],
-    offset: usize,
-) -> Result<(MessageFormat, usize), SanitizeError> {
-    if data.len() <= offset {
-        return Err(SanitizeError::ValueOutOfBounds);
-    }
-    let format = MessageFormat::try_from(data[offset]).map_err(|_| SanitizeError::InvalidValue)?;
-    let next_offset = offset
-        .checked_add(1)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    Ok((format, next_offset))
+    offset: &mut usize,
+) -> Result<MessageFormat, SanitizeError> {
+    let format_byte = read_u8(offset, data).map_err(|_| SanitizeError::ValueOutOfBounds)?;
+    MessageFormat::try_from(format_byte).map_err(|_| SanitizeError::InvalidValue)
 }
 
 /// Parse signer count from data at given offset
-pub fn parse_signer_count(data: &[u8], offset: usize) -> Result<(usize, usize), SanitizeError> {
-    if data.len() <= offset {
-        return Err(SanitizeError::ValueOutOfBounds);
-    }
-    let signer_count = data[offset] as usize;
+pub fn parse_signer_count(data: &[u8], offset: &mut usize) -> Result<usize, SanitizeError> {
+    let signer_count = read_u8(offset, data).map_err(|_| SanitizeError::ValueOutOfBounds)? as usize;
     if signer_count == 0 {
         return Err(SanitizeError::InvalidValue);
     }
-    let next_offset = offset
-        .checked_add(1)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    Ok((signer_count, next_offset))
+    Ok(signer_count)
 }
 
 /// Parse signers from data at given offset
 pub fn parse_signers(
     data: &[u8],
-    offset: usize,
+    offset: &mut usize,
     signer_count: usize,
-) -> Result<(Vec<[u8; 32]>, usize), SanitizeError> {
-    let signers_size = signer_count
-        .checked_mul(32)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    let end_offset = offset
-        .checked_add(signers_size)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    if data.len() < end_offset {
-        return Err(SanitizeError::ValueOutOfBounds);
-    }
-
+) -> Result<Vec<[u8; 32]>, SanitizeError> {
     let mut signers = Vec::with_capacity(signer_count);
-    let mut current_offset = offset;
     for _ in 0..signer_count {
+        let signer_bytes =
+            read_slice(offset, data, 32).map_err(|_| SanitizeError::ValueOutOfBounds)?;
         let mut signer = [0u8; 32];
-        let signer_end = current_offset
-            .checked_add(32)
-            .ok_or(SanitizeError::ValueOutOfBounds)?;
-        signer.copy_from_slice(&data[current_offset..signer_end]);
+        signer.copy_from_slice(&signer_bytes);
         signers.push(signer);
-        current_offset = signer_end;
     }
-    Ok((signers, current_offset))
+    Ok(signers)
 }
 
 /// Parse message length from data at given offset
-pub fn parse_message_length(data: &[u8], offset: usize) -> Result<(usize, usize), SanitizeError> {
-    let end_offset = offset
-        .checked_add(2)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    if data.len() < end_offset {
-        return Err(SanitizeError::ValueOutOfBounds);
-    }
-    let second_byte_offset = offset
-        .checked_add(1)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    let message_len = u16::from_le_bytes([data[offset], data[second_byte_offset]]) as usize;
+pub fn parse_message_length(data: &[u8], offset: &mut usize) -> Result<usize, SanitizeError> {
+    let message_len = read_u16(offset, data).map_err(|_| SanitizeError::ValueOutOfBounds)? as usize;
     if message_len == 0 {
         return Err(SanitizeError::InvalidValue);
     }
-    Ok((message_len, end_offset))
+    Ok(message_len)
 }
 
 /// Parse message body from data at given offset
 pub fn parse_message_body(
     data: &[u8],
-    offset: usize,
+    offset: &mut usize,
     expected_len: usize,
 ) -> Result<Vec<u8>, SanitizeError> {
-    let expected_total = offset
-        .checked_add(expected_len)
-        .ok_or(SanitizeError::ValueOutOfBounds)?;
-    if expected_total != data.len() {
+    // Verify we're at the end of the data after reading the message
+    let remaining = data.len().saturating_sub(*offset);
+    if remaining != expected_len {
         return Err(SanitizeError::InvalidValue);
     }
-    Ok(data[offset..].to_vec())
+    read_slice(offset, data, expected_len).map_err(|_| SanitizeError::ValueOutOfBounds)
 }
 
 /// Validate format constraints against parsed data
@@ -199,14 +160,14 @@ pub fn serialize_v0(
         .saturating_add(message.len());
     data.reserve(reserve_size);
 
-    data.extend_from_slice(application_domain);
-    data.push(format.into());
-    data.push(signers.len() as u8);
+    append_slice(data, application_domain);
+    append_u8(data, format.into());
+    append_u8(data, signers.len() as u8);
     for signer in signers {
-        data.extend_from_slice(signer);
+        append_slice(data, signer);
     }
-    data.extend_from_slice(&(message.len() as u16).to_le_bytes());
-    data.extend_from_slice(message);
+    append_u16(data, message.len() as u16);
+    append_slice(data, message);
     Ok(())
 }
 
@@ -217,12 +178,13 @@ pub fn deserialize_v0(data: &[u8]) -> Result<V0MessageComponents, SanitizeError>
     }
 
     // Parse each component using helper functions
-    let (application_domain, offset) = parse_application_domain(data, 0)?;
-    let (format, offset) = parse_message_format(data, offset)?;
-    let (signer_count, offset) = parse_signer_count(data, offset)?;
-    let (signers, offset) = parse_signers(data, offset, signer_count)?;
-    let (message_len, offset) = parse_message_length(data, offset)?;
-    let message = parse_message_body(data, offset, message_len)?;
+    let mut offset = 0;
+    let application_domain = parse_application_domain(data, &mut offset)?;
+    let format = parse_message_format(data, &mut offset)?;
+    let signer_count = parse_signer_count(data, &mut offset)?;
+    let signers = parse_signers(data, &mut offset, signer_count)?;
+    let message_len = parse_message_length(data, &mut offset)?;
+    let message = parse_message_body(data, &mut offset, message_len)?;
 
     // Validate format constraints
     let total_size = header::total_message_size(signers.len(), message_len);
@@ -301,23 +263,27 @@ mod tests {
     fn test_parsing_functions() {
         // Test parse_application_domain
         let domain_data = [0x42u8; 64];
-        let (domain, offset) = parse_application_domain(&domain_data, 0).unwrap();
+        let mut offset = 0;
+        let domain = parse_application_domain(&domain_data, &mut offset).unwrap();
         assert_eq!(domain, [0x42u8; 32]);
         assert_eq!(offset, 32);
+        let mut bad_offset = 0;
         assert_eq!(
-            parse_application_domain(&[0x42u8; 16], 0),
+            parse_application_domain(&[0x42u8; 16], &mut bad_offset),
             Err(SanitizeError::ValueOutOfBounds)
         ); // insufficient data
 
         // Test parse_message_format
+        let mut offset = 0;
         assert_eq!(
-            parse_message_format(&[255], 0),
+            parse_message_format(&[255], &mut offset),
             Err(SanitizeError::InvalidValue)
         ); // invalid format
 
         // Test parse_signer_count
+        let mut offset = 0;
         assert_eq!(
-            parse_signer_count(&[0], 0),
+            parse_signer_count(&[0], &mut offset),
             Err(SanitizeError::InvalidValue)
         ); // zero count
 
@@ -325,29 +291,34 @@ mod tests {
         let mut signer_data = vec![];
         signer_data.extend_from_slice(&[0x11u8; 32]);
         signer_data.extend_from_slice(&[0x22u8; 32]);
-        let (signers, offset) = parse_signers(&signer_data, 0, 2).unwrap();
+        let mut offset = 0;
+        let signers = parse_signers(&signer_data, &mut offset, 2).unwrap();
         assert_eq!(signers.len(), 2);
         assert_eq!(signers[0], [0x11u8; 32]);
         assert_eq!(offset, 64);
+        let mut bad_offset = 0;
         assert_eq!(
-            parse_signers(&[0u8; 16], 0, 2),
+            parse_signers(&[0u8; 16], &mut bad_offset, 2),
             Err(SanitizeError::ValueOutOfBounds)
         ); // insufficient data
 
         // Test parse_message_length
+        let mut offset = 0;
         assert_eq!(
-            parse_message_length(&[0x00, 0x00], 0),
+            parse_message_length(&[0x00, 0x00], &mut offset),
             Err(SanitizeError::InvalidValue)
         ); // zero length
 
         // Test parse_message_body
         let body_data = b"Hello World!";
+        let mut offset = 0;
         assert_eq!(
-            parse_message_body(body_data, 0, body_data.len()),
+            parse_message_body(body_data, &mut offset, body_data.len()),
             Ok(body_data.to_vec())
         );
+        let mut bad_offset = 0;
         assert_eq!(
-            parse_message_body(b"Hello", 0, 10),
+            parse_message_body(b"Hello", &mut bad_offset, 10),
             Err(SanitizeError::InvalidValue)
         ); // length mismatch
     }
