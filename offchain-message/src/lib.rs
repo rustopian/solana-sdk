@@ -235,11 +235,9 @@ impl OffchainMessage {
         let message_signers = match self {
             Self::V0(msg) => &msg.signers,
         };
-
         if Self::is_single_dummy_signer_message(message_signers) {
             return Self::sign_with_rebuilt_message(self, signer, signer_pubkey);
         }
-
         // Spec compliance: verify signer is authorized
         Self::verify_signer_authorized(message_signers, &signer_pubkey)?;
         Ok(signer.sign_message(&self.serialize()?))
@@ -328,16 +326,13 @@ mod tests {
         use solana_signer::Signer;
         let keypair = Keypair::new();
         let message_text = "Test Message";
-
         #[allow(deprecated)]
         let message = OffchainMessage::new(0, message_text.as_bytes()).unwrap();
         let signature = message.sign(&keypair).unwrap();
-
         assert_eq!(message.get_version(), 0);
         assert!(
             matches!(message, OffchainMessage::V0(ref msg) if msg.message == message_text.as_bytes())
         );
-
         let expected_signed_message = OffchainMessage::new_with_params(
             0,
             [0u8; 32],
@@ -354,12 +349,10 @@ mod tests {
     fn test_new_with_domain() {
         let keypair = Keypair::new();
         let custom_domain = [0x42u8; 32];
-
         let message = OffchainMessage::new_with_domain(0, custom_domain, b"Domain test").unwrap();
         assert!(
             matches!(message, OffchainMessage::V0(ref msg) if msg.application_domain == custom_domain)
         );
-
         let signature = message.sign(&keypair).unwrap();
         let expected_message = OffchainMessage::new_with_params(
             0,

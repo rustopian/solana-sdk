@@ -290,7 +290,6 @@ mod tests {
         let (parsed_domain, parsed_format, parsed_signers, parsed_message) =
             deserialize_v0(&serialized).unwrap();
 
-        // Verify round trip
         assert_eq!(parsed_domain, application_domain);
         assert_eq!(parsed_format, format);
         assert_eq!(parsed_signers, signers);
@@ -308,7 +307,6 @@ mod tests {
         assert_eq!(format, MessageFormat::RestrictedAscii);
         assert_eq!(parsed_signers, signers);
         assert_eq!(parsed_message, message);
-
         assert_eq!(
             new_v0_with_params(application_domain, &[], b"Hello World!"),
             Err(SanitizeError::ValueOutOfBounds)
