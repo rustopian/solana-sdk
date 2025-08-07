@@ -30,6 +30,6 @@ solana-signature = { version = "2.3.0", features = ["verify"] }
 solana-signer = "2.2.1"
 
 [dev-dependencies]
-solana-keypair = { workspace = true }
+solana-keypair = "2.2.3"
 solana-offchain-message = { path = ".", features = ["dev-context-only-utils"] }
 static_assertions = { workspace = true }
