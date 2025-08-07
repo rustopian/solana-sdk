@@ -6,8 +6,8 @@ use {
     solana_signer::Signer,
 };
 
-/// Envelope for off-chain messages with multiple signatures
-/// All signers listed in the message must provide signatures (no threshold logic)
+/// Envelope for off-chain messages with multiple signatures.
+/// All signers listed in the message must provide signatures.
 /// This implements the envelope format from the spec:
 /// | Field | Start offset | Length (bytes) | Description |
 /// | Signature Count | 0x00 | 1 | Number of signatures |
@@ -21,9 +21,7 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    /// Create a new envelope from existing signatures and message
-    /// This allows for partial signing scenarios (e.g., collecting signatures from multiple parties)
-    /// Note: This bypasses signature verification during construction
+    /// Create a new envelope from existing signatures and message.
     pub fn new(message: OffchainMessage, signatures: Vec<Signature>) -> Self {
         Self {
             message,
@@ -37,14 +35,18 @@ impl Envelope {
         message: OffchainMessage,
         signers: &[&dyn Signer],
     ) -> Result<Self, SanitizeError> {
+        let message_signers = match &message {
+            crate::OffchainMessage::V0(msg) => &msg.signers,
+        };
+
         // Verify signer count matches message signer count
-        if signers.len() != message.get_signers().len() {
+        if signers.len() != message_signers.len() {
             return Err(SanitizeError::ValueOutOfBounds);
         }
 
         // Verify signers match the expected pubkeys in order
         for (i, signer) in signers.iter().enumerate() {
-            if signer.pubkey().to_bytes() != message.get_signers()[i] {
+            if signer.pubkey().to_bytes() != message_signers[i] {
                 return Err(SanitizeError::InvalidValue);
             }
         }
@@ -67,12 +69,16 @@ impl Envelope {
     /// Verify all signatures in the envelope and message compliance
     #[cfg(feature = "verify")]
     pub fn verify_all(&self) -> Result<bool, SanitizeError> {
-        if self.signatures.len() != self.message.get_signers().len() {
+        let message_signers = match &self.message {
+            crate::OffchainMessage::V0(msg) => &msg.signers,
+        };
+
+        if self.signatures.len() != message_signers.len() {
             return Ok(false);
         }
 
         let message_bytes = self.message.serialize()?;
-        let signers = self.message.get_signers();
+        let signers = message_signers;
 
         // Verify each signature matches the corresponding pubkey
         for (signature, signer_bytes) in self.signatures.iter().zip(signers.iter()) {
@@ -159,7 +165,10 @@ impl Envelope {
         let message = OffchainMessage::deserialize(message_data)?;
 
         // Verify signature count matches message signer count
-        if signatures.len() != message.get_signers().len() {
+        let message_signers = match &message {
+            crate::OffchainMessage::V0(msg) => &msg.signers,
+        };
+        if signatures.len() != message_signers.len() {
             return Err(SanitizeError::InvalidValue);
         }
 
@@ -260,7 +269,9 @@ mod tests {
         // Verify envelope structure
         assert_eq!(envelope.signatures().len(), 3);
         assert_eq!(envelope.message(), &message);
-        assert_eq!(envelope.message().get_signers().len(), 3);
+        assert!(
+            matches!(envelope.message(), crate::OffchainMessage::V0(ref msg) if msg.signers.len() == 3)
+        );
 
         // Test serialization/deserialization
         let serialized = envelope.serialize().unwrap();
