@@ -67,7 +67,6 @@ impl Envelope {
     }
 
     /// Verify all signatures in the envelope and message compliance
-    #[cfg(feature = "verify")]
     pub fn verify_all(&self) -> Result<bool, SanitizeError> {
         let message_signers = match &self.message {
             crate::OffchainMessage::V0(msg) => &msg.signers,
