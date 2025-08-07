@@ -19,26 +19,30 @@ use {
 /// | Message Body | varies | variable | The message content |
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Envelope {
-    signatures: Vec<Signature>,
-    message: OffchainMessage,
+    pub signatures: Vec<Signature>,
+    pub message: OffchainMessage,
 }
 
 impl Envelope {
+    /// Extract the signer list from a message
+    fn message_signers(message: &OffchainMessage) -> &[[u8; 32]] {
+        match message {
+            crate::OffchainMessage::V0(msg) => &msg.signers,
+        }
+    }
+
     /// Create a new envelope by signing with all provided signers
     /// All signers must match the signers list in the message, in order
     pub fn new(message: OffchainMessage, signers: &[&dyn Signer]) -> Result<Self, SanitizeError> {
-        let message_signers = match &message {
-            crate::OffchainMessage::V0(msg) => &msg.signers,
-        };
+        let message_signers = Self::message_signers(&message);
 
-        // Verify signer count matches message signer count
+        // Verify signer count and validate each signer's pubkey in one pass
         if signers.len() != message_signers.len() {
             return Err(SanitizeError::ValueOutOfBounds);
         }
 
-        // Verify signers match the expected pubkeys in order
-        for (i, signer) in signers.iter().enumerate() {
-            if signer.pubkey().to_bytes() != message_signers[i] {
+        for (signer, expected_pubkey) in signers.iter().zip(message_signers.iter()) {
+            if signer.pubkey().to_bytes() != *expected_pubkey {
                 return Err(SanitizeError::InvalidValue);
             }
         }
@@ -46,11 +50,10 @@ impl Envelope {
         // Serialize the message once for all signatures
         let message_bytes = message.serialize()?;
 
-        // Create signatures in the same order as the signers in the message
-        let mut signatures = Vec::with_capacity(signers.len());
-        for signer in signers {
-            signatures.push(signer.sign_message(&message_bytes));
-        }
+        let signatures: Vec<_> = signers
+            .iter()
+            .map(|s| s.sign_message(&message_bytes))
+            .collect();
 
         Ok(Self {
             signatures,
@@ -60,9 +63,7 @@ impl Envelope {
 
     /// Verify all signatures in the envelope and message compliance
     pub fn verify_all(&self) -> Result<bool, SanitizeError> {
-        let message_signers = match &self.message {
-            crate::OffchainMessage::V0(msg) => &msg.signers,
-        };
+        let message_signers = Self::message_signers(&self.message);
 
         if self.signatures.len() != message_signers.len() {
             return Ok(false);
@@ -141,9 +142,7 @@ impl Envelope {
         let message = OffchainMessage::deserialize(message_data)?;
 
         // Verify signature count matches message signer count
-        let message_signers = match &message {
-            crate::OffchainMessage::V0(msg) => &msg.signers,
-        };
+        let message_signers = Self::message_signers(&message);
         if signatures.len() != message_signers.len() {
             return Err(SanitizeError::InvalidValue);
         }
@@ -162,16 +161,6 @@ impl Envelope {
         }
 
         Ok(envelope)
-    }
-
-    /// Get the signatures
-    pub fn signatures(&self) -> &[Signature] {
-        &self.signatures
-    }
-
-    /// Get the message
-    pub fn message(&self) -> &OffchainMessage {
-        &self.message
     }
 }
 
@@ -206,10 +195,10 @@ mod tests {
         let envelope = Envelope::new(message.clone(), &signing_keypairs).unwrap();
 
         // Verify envelope structure
-        assert_eq!(envelope.signatures().len(), 3);
-        assert_eq!(envelope.message(), &message);
+        assert_eq!(envelope.signatures.len(), 3);
+        assert_eq!(envelope.message, message);
         assert!(
-            matches!(envelope.message(), crate::OffchainMessage::V0(ref msg) if msg.signers.len() == 3)
+            matches!(envelope.message, crate::OffchainMessage::V0(ref msg) if msg.signers.len() == 3)
         );
 
         // Test serialization/deserialization
