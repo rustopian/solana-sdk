@@ -3635,6 +3635,7 @@ dependencies = [
  "num_enum",
  "solana-hash 2.3.0",
  "solana-keypair 2.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "solana-offchain-message",
  "solana-packet 2.2.1",
  "solana-pubkey 2.4.0",
  "solana-sanitize 2.2.1",
